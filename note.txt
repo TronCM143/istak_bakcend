@@ -1,0 +1,8 @@
+celery -A istak_backend worker -l info -P solo 
+//C:\Program Files>.\redis-cli.exe ping //RUN ON SHELL ADMIN PERMIN ON,
+#run this inorder for notification function to run.
+
+
+celery -A istak_backend worker -l info -P solo 
+celery -A istak_backend beat -l info
+python manage.py runserver 0.0.0.0:8000
