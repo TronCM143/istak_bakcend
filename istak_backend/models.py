@@ -81,28 +81,35 @@ class Borrower(models.Model):
     school_id = models.CharField(max_length=10, unique=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     image = models.ImageField(upload_to='borrower_images/', null=True, blank=True)
+    return_image = models.ImageField(upload_to='borrower_return_images/', null=True, blank=True)
 
     def __str__(self):
         return f"{self.name} (School ID: {self.school_id})"
 
+
+from django.utils.timezone import localdate
 class Transaction(models.Model):
     STATUS_CHOICES = [
         ('borrowed', 'Borrowed'),
         ('returned', 'Returned'),
         ('overdue', 'Overdue'),
     ]
-    borrow_date = models.DateField(auto_now_add=True)
+    borrow_date = models.DateField(default=localdate)
     return_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='borrowed', db_index=True)
     manager = models.ForeignKey(
         CustomUser,
         limit_choices_to={'role': 'user_web'},
+        null=True,
+        blank=True,
         on_delete=models.PROTECT,
         related_name='transactions_managed'
     )
     mobile_user = models.ForeignKey(
         CustomUser,
         limit_choices_to={'role': 'user_mobile'},
+        null=True,          # ← ADDED: Allows NULL in DB for user_web cases
+        blank=True,         # ← ADDED: Allows empty in forms/serializers
         on_delete=models.PROTECT,
         related_name='transactions_made'
     )
@@ -164,3 +171,47 @@ class StudentOrgModerator(CustomUser):
         proxy = True
         verbose_name = "Student Org Moderator"
         verbose_name_plural = "Student Org Moderators"
+        
+        
+from django.utils import timezone
+from datetime import timedelta
+
+class PredictiveItemCondition(models.Model):
+    item = models.OneToOneField(Item, on_delete=models.CASCADE, related_name='prediction')
+    predicted_risk = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True, null=True)
+    last_checked = models.DateTimeField(auto_now=True)
+
+    def update_prediction(self):
+        """
+        Rule-based predictive model for future damage risk.
+        """
+        from .models import Transaction  # avoid circular import
+        now = timezone.now().date()
+        transactions = Transaction.objects.filter(items=self.item)
+
+        total_borrows = transactions.count()
+        recent_borrows = transactions.filter(borrow_date__gte=now - timedelta(days=90)).count()
+        overdue_count = transactions.filter(status='overdue').count()
+        damaged_returns = transactions.filter(items__condition__icontains='damaged').count()
+
+        # Weighted risk computation (simple heuristic)
+        risk = 0.0
+        if recent_borrows > 3:
+            risk += 0.3
+        if overdue_count > 1:
+            risk += 0.2
+        if damaged_returns > 0:
+            risk += 0.4
+        if total_borrows > 10:
+            risk += 0.1
+
+        self.predicted_risk = min(risk, 1.0)
+        self.reason = (
+            f"Total borrows: {total_borrows}, Recent borrows: {recent_borrows}, "
+            f"Overdue: {overdue_count}, Damaged returns: {damaged_returns}"
+        )
+        self.save()
+
+    def __str__(self):
+        return f"{self.item.item_name} - Risk: {self.predicted_risk:.2f}"

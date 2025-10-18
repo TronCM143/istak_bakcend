@@ -1,0 +1,17 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block title %}ISTAK Admin Panel{% endblock %}
+
+{% block branding %}
+<div id="site-name" style="display: flex; align-items: center;">
+  <a href="{% url 'admin:index' %}" style="text-decoration: none; color: inherit;">
+    <img src="{% static 'images/logo.png' %}" 
+         alt="ISTAK Logo" 
+         style="height: 45px; margin-right: 10px; vertical-align: middle;">
+    <span style="font-weight: 600; font-size: 18px;">Admin</span>
+  </a>
+</div>
+{% endblock %}
+
+{% block nav-global %}{% endblock %}

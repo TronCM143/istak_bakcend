@@ -41,7 +41,12 @@ urlpatterns = [
      path('api/forecast/top-items/', views.forecast_top_items_excel, name='forecast_top_items'),
      path('api/analytics/borrowed-stats/', views.borrowed_stats, name='total_borrow_ng_nakaraan'),
      path('api/transactions/<int:pk>/', views.TransactionRetrieveUpdateDestroyAPIView.as_view(), name='transaction-detail'),
-    path('api/reports/damaged-lost-items/', views.DamagedOverdueReportView.as_view(), name='damaged-overdue-report'),
+   path('api/reports/damaged-lost-items/', views.DamagedOverdueReportView.as_view(), name='damaged-overdue-report'),
     path('api/current-user/', views.CurrentUserView.as_view(), name='current-user'),
     path('api/transactions/<str:pk>/', views.TransactionDeleteAPIView.as_view(), name='transaction-delete'),
+    path('api/mobile-users/', views.MobileUsersList.as_view(), name='mobile-users-list'),
+    path('api/change-password/<int:user_id>/', views.change_mobile_password, name='change-mobile-password'),
+   path('api/predictive/insights/', views.PredictiveDamageInsightView.as_view(), name='predictive-insights'),
+  path('api/reports/transactions/', views.TransactionReportView.as_view(), name='transaction-report'),
+
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

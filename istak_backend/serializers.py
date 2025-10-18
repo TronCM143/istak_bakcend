@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone as dt_timezone
+from django.utils import timezone as dj_timezone
 from io import BytesIO
 from msilib.schema import File
 import requests
 from rest_framework import serializers
-from istak_backend.models import Borrower, RegistrationRequest, Transaction, Item
+from istak_backend.models import Borrower, CustomUser, PredictiveItemCondition, RegistrationRequest, Transaction, Item
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -17,13 +18,14 @@ class BorrowerSerializer(serializers.ModelSerializer):
     borrowed_items = serializers.SerializerMethodField()
     transaction_count = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
-    total_borrowed_items = serializers.SerializerMethodField()  # Changed to SerializerMethodField
+    total_borrowed_items = serializers.SerializerMethodField()
     last_borrowed_date = serializers.DateField(read_only=True, allow_null=True)
     current_borrow_date = serializers.SerializerMethodField()
-
+    return_image_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = Borrower
-        fields = ['id', 'name', 'school_id', 'status', 'image', 'borrowed_items', 'transaction_count', 'total_borrowed_items', 'last_borrowed_date', 'current_borrow_date']
+        fields = ['id', 'name', 'school_id', 'status', 'image', 'borrowed_items', 'transaction_count', 'total_borrowed_items', 'last_borrowed_date', 'current_borrow_date', 'return_image_url']
 
     def get_borrowed_items(self, obj):
         transactions = Transaction.objects.filter(
@@ -44,9 +46,14 @@ class BorrowerSerializer(serializers.ModelSerializer):
         if obj.image and hasattr(obj.image, 'url'):
             return request.build_absolute_uri(obj.image.url) if request else obj.image.url
         return None
+    
+    def get_return_image_url(self, obj):
+        request = self.context.get('request')
+        if obj.return_image and hasattr(obj.return_image, 'url'):
+            return request.build_absolute_uri(obj.return_image.url) if request else obj.return_image.url
+        return None
 
     def get_total_borrowed_items(self, obj):
-        # Compute the total number of items currently borrowed
         transactions = Transaction.objects.filter(
             borrower=obj,
             status='borrowed',
@@ -133,20 +140,26 @@ class DamagedOverdueReportSerializer(serializers.ModelSerializer):
     borrowerImage = serializers.ImageField(source='borrower.image', allow_null=True)
     itemName = serializers.SerializerMethodField()
     issue = serializers.SerializerMethodField()
+    daysPastDue = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
-        fields = ['id', 'borrowerName', 'school_id', 'borrowerImage', 'itemName', 'issue']
+        fields = ['id', 'borrowerName', 'school_id', 'borrowerImage', 'itemName', 'issue', 'daysPastDue']
 
     def get_itemName(self, obj):
         return ", ".join(item.item_name for item in obj.items.all())
 
     def get_issue(self, obj):
-        if obj.status == 'returned' and any(item.condition.lower() == 'damaged' for item in obj.items.all()):
+        if obj.status == 'returned' and any(item.condition and item.condition.lower() in ['damaged', 'broken'] for item in obj.items.all()):
             return 'Damaged'
-        elif obj.status == 'borrowed' and (timezone.now().date() - obj.borrow_date).days > 7:
+        elif obj.status == 'borrowed' and obj.return_date and obj.return_date < dj_timezone.now().date():
             return 'Overdue'
         return 'Unknown'
+
+    def get_daysPastDue(self, obj):
+        if obj.status == 'borrowed' and obj.return_date and obj.return_date < dj_timezone.now().date():
+            return (dj_timezone.now().date() - obj.return_date).days
+        return None
 
 class ItemSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
@@ -222,8 +235,52 @@ class CreateBorrowingSerializerWithURL(serializers.Serializer):
             borrower=borrower,
             mobile_user=self.context['request'].user,
             status='borrowed',
-            borrow_date=datetime.now(timezone.utc).date(),
+            borrow_date=dj_timezone.now().date(),
             return_date=validated_data['return_date'],
         )
         transaction.items.set(validated_data['item_ids'])
         return transaction
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ['id', 'username', 'email', 'date_joined']
+
+class PredictiveItemSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source='item.item_name', read_only=True)
+    condition = serializers.CharField(source='item.condition', read_only=True)
+
+    class Meta:
+        model = PredictiveItemCondition
+        fields = ['item_name', 'condition', 'predicted_risk', 'reason', 'last_checked']
+
+class TransactionReportSerializer(serializers.ModelSerializer):
+    borrowerName = serializers.CharField(source='borrower.name')
+    schoolId = serializers.CharField(source='borrower.school_id')
+    borrowerImage = serializers.SerializerMethodField()
+    borrowDate = serializers.DateField(source='borrow_date')
+    returnDate = serializers.DateField(source='return_date', allow_null=True)
+    items = serializers.SerializerMethodField()
+    daysPastDue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Transaction
+        fields = ['id', 'borrowerName', 'schoolId', 'borrowerImage', 'borrowDate', 'returnDate', 'status', 'items', 'daysPastDue']
+
+    def get_borrowerImage(self, obj):
+        request = self.context.get('request')
+        if obj.borrower and obj.borrower.image:
+            if request:
+                return request.build_absolute_uri(obj.borrower.image.url)
+            return obj.borrower.image.url
+        return None
+
+    def get_items(self, obj):
+        return [{'itemName': item.item_name, 'condition': item.condition or 'Good'} for item in obj.items.all()]
+
+    def get_daysPastDue(self, obj):
+        if obj.status == 'borrowed' and obj.return_date:
+            today = dj_timezone.now().date()
+            if obj.return_date < today:
+                return (today - obj.return_date).days
+        return None

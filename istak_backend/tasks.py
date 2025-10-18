@@ -73,8 +73,8 @@ def notify_due_items():
 
         send_push_notification(
             token,
-            "Overdue Item(s)",
-            f"School ID: {borrower_id} hasn’t returned '{item_names}' "
+            "ITEM OVERDUE!",
+            f"School ID: {borrower_id} hasn’t returned'{item_names}' "
             f"for {days_overdue} day(s)."
         )
         sent_count += 1

@@ -1,12 +1,12 @@
 import logging
 import json
-from django.utils import timezone
+from django.utils import timezone as dj_timezone
 from django.contrib.auth import get_user_model, authenticate, login
 from django.contrib.auth.hashers import make_password
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
-from jsonschema import ValidationError
+
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -253,6 +253,11 @@ class ItemListCreateAPIView(generics.ListCreateAPIView):
             logger.info(f"Background removed for item {instance.id}")
             print(f"✅ Background removed successfully for item {instance.id}")
 
+
+
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
 class ItemRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ItemSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -291,7 +296,12 @@ class ItemRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_destroy(self, instance):
         if instance.transactions.exists():
-            raise ValidationError("Cannot delete an item that has associated transactions.")
+            # Better: Return Response directly (avoids exception handling altogether)
+            return Response(
+                {"detail": "Cannot delete an item that has associated transactions."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        # Or, if raising: raise ValidationError(...)  # Now with correct import
         instance.delete()
 
 @api_view(['POST'])
@@ -387,7 +397,7 @@ class RegistrationRequestViewSet(viewsets.ModelViewSet):
     
 import logging
 import json
-from django.utils import timezone
+
 from django.core.files.base import ContentFile
 from datetime import date
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -396,6 +406,7 @@ from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction as db_transaction
+from django.db.models import Count
 from uuid import UUID
 from istak_backend.models import Item, Borrower, Transaction
 from .serializers import CreateBorrowingSerializer, TransactionSerializer
@@ -447,7 +458,7 @@ def borrowing_create(request):
         return_date = validated['return_date']
         item_ids = validated['item_ids']
 
-        # Role check
+        # Role check - already allows both user_mobile and user_web
         if request.user.role not in ['user_mobile', 'user_web']:
             return Response({"error": "Invalid user role"}, status=status.HTTP_403_FORBIDDEN)
 
@@ -476,12 +487,30 @@ def borrowing_create(request):
             borrower.name = name
             borrower.status = status_choice
             if image_file:
-                timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
+                timestamp = dj_timezone.now().strftime("%Y%m%d%H%M%S")
                 orig_name = getattr(image_file, 'name', 'upload')
                 filename = f"{school_id}_{timestamp}_{orig_name}"
                 borrower.image.save(filename, ContentFile(image_file.read()), save=False)
             borrower.save()
 
+            # Check for duplicate transaction
+            existing_transaction = Transaction.objects.filter(
+                borrower=borrower,
+                borrow_date=date.today(),
+                return_date=return_date,
+                status='borrowed',
+                manager=manager,
+            ).select_related('borrower').prefetch_related('items').first()
+
+            if existing_transaction:
+                existing_item_ids = set(existing_transaction.items.values_list('id', flat=True))
+                if existing_item_ids == set(item_ids):
+                    # Duplicate found - return existing transaction data
+                    response_serializer = TransactionSerializer(existing_transaction, context={'request': request})
+                    logger.info(f"Duplicate transaction detected and skipped: {existing_transaction.id}")
+                    return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+            # No duplicate - create new transaction
             transaction = Transaction.objects.create(
                 borrower=borrower,
                 borrow_date=date.today(),
@@ -499,7 +528,6 @@ def borrowing_create(request):
     except Exception as e:
         logger.exception("Error creating borrowing")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
     
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])
@@ -614,26 +642,31 @@ def top_borrowed_items(request):
     return Response(serializer.data)
 
 
-            
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .models import Transaction
-from django.utils import timezone
+
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from rest_framework.permissions import AllowAny
+import logging  # FIXED: Added for debugging
+
+logger = logging.getLogger(__name__)
+
 class MonthlyTransactionsView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny] 
     def get(self, request):
         try:
-            # Calculate the date range: last 6 months from today
-            today = timezone.now().date()
-            start_date = today - relativedelta(months=6)
+            # Calculate the date range: last 6 months + current = 7 months
+            today = dj_timezone.now().date()
+            start_date = today - relativedelta(months=6)  # Starts from 7 months ago
             transactions = Transaction.objects.filter(borrow_date__gte=start_date)
 
-            # Initialize monthly data
+            logger.info(f"Fetching transactions from {start_date} to {today}. Found {transactions.count()} total.")
+
+            # Initialize monthly data for exactly 7 months (with zeros for empty)
             monthly_data = {}
             current_date = start_date
             while current_date <= today:
@@ -641,7 +674,7 @@ class MonthlyTransactionsView(APIView):
                 monthly_data[month_key] = {'borrowed': 0, 'returned': 0}
                 current_date += relativedelta(months=1)
 
-            # Aggregate transactions
+            # Aggregate transactions - FIXED: Ensure borrow_date is used correctly
             for t in transactions:
                 month_key = t.borrow_date.strftime('%Y-%m')
                 if month_key in monthly_data:
@@ -650,25 +683,31 @@ class MonthlyTransactionsView(APIView):
                     elif t.status.lower() == 'returned':
                         monthly_data[month_key]['returned'] += 1
 
-            # Format response
+            logger.info(f"Aggregated data: {monthly_data}")  # FIXED: Added logging to debug empty months
+
+            # Format response - FIXED: Sort ascending (oldest first) for chart flow; ensure 7 items
             monthly_result = [
                 {
                     'month': datetime.strptime(month_key, '%Y-%m').strftime('%B'),  # e.g., "April"
                     'borrowed': data['borrowed'],
                     'returned': data['returned']
                 }
-                for month_key, data in sorted(monthly_data.items())
+                for month_key, data in sorted(monthly_data.items())  # Ensures oldest to newest
             ]
 
+            # FIXED: Trim to exactly 7 if more (edge case), but loop ensures 7
+            if len(monthly_result) > 7:
+                monthly_result = monthly_result[-7:]  # Last 7 (safeguard)
+
+            logger.info(f"Returning {len(monthly_result)} months: {monthly_result}")
             return Response(monthly_result, status=status.HTTP_200_OK)
 
         except Exception as e:
+            logger.error(f"Error in MonthlyTransactionsView: {str(e)}")
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            
-            
             
 
 @api_view(['POST'])
@@ -884,15 +923,19 @@ def item_borrower_view(request, itemId):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
-from django.utils import timezone
-from django.db import transaction  # Module for atomic()
-import json
+from rest_framework.response import Response
+from rest_framework import status
+from django.db.models import Count
+
+from .models import Item, Transaction, Borrower
+from PIL import Image, ImageDraw, ImageFont
+from django.core.files.base import ContentFile
+from io import BytesIO
+import os
+from django.conf import settings
 import logging
-from istak_backend.models import Transaction, Item, Borrower
 
 logger = logging.getLogger(__name__)
 
@@ -901,155 +944,120 @@ logger = logging.getLogger(__name__)
 @permission_classes([IsAuthenticated])
 def return_item(request):
     try:
-        if not request.user.is_authenticated:
-            logger.error("Unauthenticated request to return_item")
-            return Response({"error": "Authentication required"}, status=status.HTTP_401_UNAUTHORIZED)
+        # Parse request data
+        school_id = request.data.get('school_id')
+        items_data = []
+        for i in range(len(request.data) // 2):  # Parse items array
+            item_id = request.data.get(f'items[{i}][itemId]') or request.data.get(f'items[{i}][item_id]')
+            condition = request.data.get(f'items[{i}][condition]')
+            if item_id and condition:
+                items_data.append({'item_id': item_id, 'condition': condition})
 
-        data = json.loads(request.body)
-        logger.info(f"Received request data: {data}")
-        transaction_id = data.get('transaction_id')
-        items_data = data.get('items', [])  # List of {itemId, condition}
-        school_id = data.get('school_id')
+        return_image = request.FILES.get('return_image')
+        if not items_data:
+            return Response({"error": "No items provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not transaction_id or not items_data or not school_id:
-            logger.error(
-                f"Missing required fields: transaction_id={transaction_id}, "
-                f"items={items_data}, school_id={school_id}"
-            )
-            return Response(
-                {"error": "transaction_id, items, and school_id are required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Find transaction
+        item_ids = [item['item_id'] for item in items_data]
+        transactions = Transaction.objects.filter(
+            status='borrowed',
+            items__id__in=item_ids,
+        ).annotate(num_matches=Count('items__id')).filter(num_matches=len(item_ids))
 
-        # Coerce transaction_id to integer
-        try:
-            transaction_id = int(transaction_id)
-            logger.debug(f"Coerced transaction_id to: {transaction_id}, type: {type(transaction_id)}")
-        except (ValueError, TypeError):
-            logger.error(f"Invalid transaction_id: {transaction_id}")
-            return Response({"error": "Invalid transaction_id"}, status=status.HTTP_400_BAD_REQUEST)
+        if school_id:
+            transactions = transactions.filter(borrower__school_id=school_id)
 
-        manager = request.user if request.user.role == 'user_web' else request.user.manager
-        if not manager:
-            logger.error(f"No manager assigned for user {request.user.username}")
-            return Response(
-                {"error": "No manager assigned for mobile user"},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        transaction = transactions.first()
+        if not transaction:
+            return Response({"error": "No matching borrowed transaction found"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Verify borrower exists
-        try:
-            borrower = Borrower.objects.get(school_id=school_id)
-            logger.info(f"Found borrower with school_id {school_id}")
-        except Borrower.DoesNotExist:
-            logger.error(f"Borrower with school_id {school_id} not found")
-            return Response(
-                {"error": f"Borrower with school_id {school_id} not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Get borrower details
+        borrower = transaction.borrower
+        name = borrower.name
+        school_id = borrower.school_id
 
-        # Find the transaction with id explicitly selected
-        try:
-            db_transaction = Transaction.objects.select_related('borrower').prefetch_related('items').get(  # Renamed to db_transaction
-                id=transaction_id,
-                borrower=borrower,
-                status='borrowed',
-                manager=manager
-            )
-            logger.info(f"Retrieved transaction {transaction_id} with items: {[item.id for item in db_transaction.items.all()]}")
-        except Transaction.DoesNotExist:
-            logger.error(
-                f"No active transaction {transaction_id} found for borrower {school_id} "
-                f"and manager {manager.username}"
-            )
-            return Response(
-                {"error": f"No active transaction found for transaction ID {transaction_id}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        except ValueError:
-            logger.error(f"Invalid transaction_id: {transaction_id}")
-            return Response(
-                {"error": "Invalid transaction_id"},
-                status=status.HTTP_400_BAD_REQUEST
+        # Process return_image if provided
+        processed_image = None
+        if return_image:
+            # Validate image size (max 5MB)
+            if return_image.size > 5 * 1024 * 1024:
+                return Response({"error": "Return image size exceeds 5MB"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Open and process image
+            image = Image.open(return_image).convert('RGB')
+            draw = ImageDraw.Draw(image)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            text = f"Name: {name}\nSchool ID: {school_id}\nReturned: {timestamp}"
+
+            try:
+                font = ImageFont.truetype(os.path.join(settings.BASE_DIR, 'fonts', 'arial.ttf'), 24)
+            except IOError:
+                font = ImageFont.load_default(size=24)
+
+            text_position = (10, 10)
+            draw.multiline_text(
+                text_position,
+                text,
+                font=font,
+                fill=(255, 255, 255, 255),
+                stroke_width=2,
+                stroke_fill=(0, 0, 0, 255)
             )
 
-        # Validate that all transaction items are included and no extra items are submitted
-        transaction_item_ids = set(map(int, db_transaction.items.values_list('id', flat=True)))  # Use db_transaction
-        submitted_item_ids = set(int(str(item['itemId'])) for item in items_data)
-        logger.debug(f"Transaction_item_ids: {transaction_item_ids}, type: {type(next(iter(transaction_item_ids)))}")
-        logger.debug(f"Submitted_item_ids: {submitted_item_ids}, type: {type(next(iter(submitted_item_ids)))}")
-        logger.debug(f"Comparison: {transaction_item_ids == submitted_item_ids}")
+            # Save processed image to buffer
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            buffer.seek(0)
+            timestamp_clean = timestamp.replace(":", "-").replace(" ", "_")
+            filename = f"borrower_return_image_{school_id}_{timestamp_clean}.png"
+            processed_image = ContentFile(buffer.read(), name=filename)
 
-        if transaction_item_ids != submitted_item_ids:
-            logger.error(
-                f"Submitted items {submitted_item_ids} do not match transaction items {transaction_item_ids}"
-            )
-            return Response(
-                {"error": "All items in the transaction must be returned together, no extra items allowed"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Update transaction
+        transaction.status = 'returned'
+        transaction.return_date = dj_timezone.now().date()
+        transaction.save()
 
-        # Validate items and update conditions within a transaction
-        with transaction.atomic():  # Use the transaction module
-            for item_data in items_data:
-                item_id = int(item_data['itemId'])
-                condition = item_data['condition']
-                
-                try:
-                    item = Item.objects.only('id', 'manager', 'condition').get(id=item_id, manager=manager)
-                except Item.DoesNotExist:
-                    logger.error(f"Item {item_id} not found or not managed by {manager.username}")
-                    return Response(
-                        {"error": f"Item {item_id} not found or not managed by your manager"},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-
-                if condition not in ['Good', 'Fair', 'Damaged', 'Broken']:
-                    logger.error(f"Invalid condition {condition} for item {item_id}")
-                    return Response(
-                        {"error": f"Invalid condition {condition} for item {item_id}"},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                item.condition = condition
+        # Update item conditions
+        for item_data in items_data:
+            try:
+                item = Item.objects.get(id=item_data['item_id'])
+                item.condition = item_data['condition']
                 item.save()
+            except Item.DoesNotExist:
+                logger.warning(f"Item {item_data['item_id']} not found")
 
-            # Update transaction
-            db_transaction.status = 'returned'  # Use db_transaction
-            db_transaction.return_date = timezone.now().date()
-            db_transaction.save()
+        # Update borrower's return_image
+        if processed_image:
+            borrower.return_image = processed_image
+            borrower.save()
 
-        logger.info(
-            f"Successfully returned transaction {transaction_id} for borrower {school_id} "
-            f"by user {request.user.username}"
-        )
+        logger.info(f"Return processed for transaction {transaction.id}, borrower {borrower.school_id}")
         return Response(
-            {"message": f"All items in transaction {transaction_id} returned successfully"},
+            {
+                "status": "success",
+                "message": "Items returned successfully",
+                "image_url": request.build_absolute_uri(borrower.return_image.url) if processed_image else None
+            },
             status=status.HTTP_200_OK
         )
 
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON in request body")
-        return Response(
-            {"error": "Invalid JSON in request body"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
     except Exception as e:
-        logger.exception(f"Error processing return for transaction {transaction_id}")
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        logger.error(f"Error in return_item: {str(e)}")
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 # views.py
+# views.py (Revised: Now returns transaction counts, not item counts)
+from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
-from django.utils import timezone
-from django.db.models import Count
+
 from .models import Item, Transaction
+import logging
+
+logger = logging.getLogger(__name__)
 
 class InventorySummaryView(APIView):
     authentication_classes = [JWTAuthentication]
@@ -1058,9 +1066,9 @@ class InventorySummaryView(APIView):
     def get(self, request):
         try:
             user = request.user
-            today = timezone.now().date()
+            today = dj_timezone.now().date()
 
-            # Filter transactions based on user role
+            # Scope by role
             if user.role == 'user_web':
                 queryset = Transaction.objects.filter(manager=user)
                 items = Item.objects.filter(manager=user)
@@ -1070,29 +1078,40 @@ class InventorySummaryView(APIView):
             else:
                 return Response({"error": "Invalid user role"}, status=status.HTTP_403_FORBIDDEN)
 
-            # Calculate counts
-            total_items = items.count()
-            borrowed = queryset.filter(status='borrowed').aggregate(count=Count('items'))['count'] or 0
-            returning_today = queryset.filter(
+            # Counts
+            returned_transactions = queryset.filter(status='returned').count()
+            overdue_transactions = queryset.filter(
+                Q(status='overdue') | (Q(status='borrowed') & Q(return_date__lt=today))
+            ).count()
+            non_overdue_borrowed = queryset.filter(
+                status='borrowed',
+                return_date__gte=today
+            ).count()
+            borrowed_active = non_overdue_borrowed + overdue_transactions
+            returning_today_transactions = queryset.filter(
                 status='borrowed',
                 return_date=today
-            ).aggregate(count=Count('items'))['count'] or 0
-            overdue = queryset.filter(
-                status='borrowed',
-                return_date__lt=today
-            ).aggregate(count=Count('items'))['count'] or 0
-            available = total_items - borrowed
+            ).count()
+            total_transactions = returned_transactions + borrowed_active
+
+            # Log counts for debugging
+            logger.debug(f"InventorySummaryView: returned={returned_transactions}, "
+                        f"borrowed_active={borrowed_active}, non_overdue_borrowed={non_overdue_borrowed}, "
+                        f"overdue={overdue_transactions}, returning_today={returning_today_transactions}")
 
             return Response({
-                'available': available,
-                'borrowed': borrowed,
-                'returningToday': returning_today,
-                'overdue': overdue
+                'totalTransactions': total_transactions,
+                'borrowedTransactions': borrowed_active,  # For percentage (yellow + red)
+                'returnedTransactions': returned_transactions,  # Available (green)
+                'overdueTransactions': overdue_transactions,  # Red
+                'returningTodayTransactions': returning_today_transactions,  # For UI text
+                'nonOverdueBorrowedTransactions': non_overdue_borrowed,  # Yellow
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"Error in InventorySummaryView: {str(e)}")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -1167,7 +1186,7 @@ import traceback
 from django.core.cache import cache
 from datetime import date
 from dateutil.relativedelta import relativedelta
-from django.utils import timezone
+
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -1313,27 +1332,56 @@ class TransactionRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIV
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.utils import timezone
 from datetime import timedelta, datetime
 from django.db.models import Count
 from .models import Transaction
 from .serializers import TransactionSerializer
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AnalyticsTransactionsView(APIView):
     def get(self, request):
         try:
-            # Get all transactions
+            # Get all relevant transactions (no filter here, filter in aggregations)
             transactions = Transaction.objects.all()
 
             # Calculate date ranges
-            today = timezone.now().date()
-            three_months_ago = today - timedelta(days=90)
+            today = dj_timezone.now().date()
 
-            # Weekly aggregation
+            # Daily aggregation: Last 7 days
+            start_daily = today - timedelta(days=6)
+            daily_data = {}
+            daily_transactions = [t for t in transactions if start_daily <= t.borrow_date <= today]
+            for t in daily_transactions:
+                day_key = t.borrow_date.strftime('%Y-%m-%d')
+                if day_key not in daily_data:
+                    daily_data[day_key] = {'count': 0, 'items': {}}
+                daily_data[day_key]['count'] += 1
+                for item in t.items.all():
+                    item_name = item.item_name
+                    daily_data[day_key]['items'][item_name] = daily_data[day_key]['items'].get(item_name, 0) + 1
+
+            daily_7_result = [
+                {
+                    'date': day_key,
+                    'count': data['count'],
+                    'top_items': [
+                        {'item': item, 'count': count}
+                        for item, count in sorted(
+                            data['items'].items(), key=lambda x: x[1], reverse=True
+                        )[:5]
+                    ]
+                }
+                for day_key, data in sorted(daily_data.items())  # Ascending: past to present
+            ]
+
+            # Weekly aggregation: Last 8 weeks
+            start_weekly = today - timedelta(weeks=7)  # 8 weeks including current
             weekly_data = {}
-            for t in transactions:
+            weekly_transactions = [t for t in transactions if t.borrow_date >= start_weekly]
+            for t in weekly_transactions:
                 borrow_date = t.borrow_date
-                # Get Monday of the week
                 day = borrow_date.weekday()
                 week_start = borrow_date - timedelta(days=day)
                 week_key = week_start.strftime('%Y-%m-%d')
@@ -1341,12 +1389,11 @@ class AnalyticsTransactionsView(APIView):
                 if week_key not in weekly_data:
                     weekly_data[week_key] = {'count': 0, 'items': {}}
                 weekly_data[week_key]['count'] += 1
-                # Iterate over all items in the transaction
-                for item in t.items.all():  # Changed from t.item to t.items.all()
+                for item in t.items.all():
                     item_name = item.item_name
                     weekly_data[week_key]['items'][item_name] = weekly_data[week_key]['items'].get(item_name, 0) + 1
 
-            weekly_result = [
+            weekly_8_result = [
                 {
                     'week_start': week_key,
                     'count': data['count'],
@@ -1357,23 +1404,24 @@ class AnalyticsTransactionsView(APIView):
                         )[:5]
                     ]
                 }
-                for week_key, data in sorted(weekly_data.items())
-                if datetime.strptime(week_key, '%Y-%m-%d').date() >= three_months_ago
-            ]
+                for week_key, data in sorted(weekly_data.items())  # Ascending
+                if datetime.strptime(week_key, '%Y-%m-%d').date() >= start_weekly
+            ][:8]  # Ensure max 8
 
-            # Monthly aggregation
+            # Monthly aggregation: Last 12 months
+            start_monthly = today - relativedelta(months=11)  # 12 months including current
             monthly_data = {}
-            for t in transactions:
+            monthly_transactions = [t for t in transactions if t.borrow_date >= start_monthly]
+            for t in monthly_transactions:
                 month_key = t.borrow_date.strftime('%Y-%m')
                 if month_key not in monthly_data:
                     monthly_data[month_key] = {'count': 0, 'items': {}}
                 monthly_data[month_key]['count'] += 1
-                # Iterate over all items in the transaction
-                for item in t.items.all():  # Changed from t.item to t.items.all()
+                for item in t.items.all():
                     item_name = item.item_name
                     monthly_data[month_key]['items'][item_name] = monthly_data[month_key]['items'].get(item_name, 0) + 1
 
-            monthly_result = [
+            monthly_12_result = [
                 {
                     'month': month_key,
                     'count': data['count'],
@@ -1384,64 +1432,58 @@ class AnalyticsTransactionsView(APIView):
                         )[:5]
                     ]
                 }
-                for month_key, data in sorted(monthly_data.items())
-                if datetime.strptime(month_key, '%Y-%m').date() >= three_months_ago.replace(day=1)
-            ]
-
-            # Three months aggregation (by month within the last 90 days)
-            three_months_result = [
-                {
-                    'month': month_key,
-                    'count': data['count'],
-                    'top_items': [
-                        {'item': item, 'count': count}
-                        for item, count in sorted(
-                            data['items'].items(), key=lambda x: x[1], reverse=True
-                        )[:5]
-                    ]
-                }
-                for month_key, data in sorted(monthly_data.items())
-                if datetime.strptime(month_key, '%Y-%m').date() >= three_months_ago.replace(day=1)
-            ]
+                for month_key, data in sorted(monthly_data.items())  # Ascending
+                if datetime.strptime(month_key, '%Y-%m').date() >= start_monthly.replace(day=1)
+            ][:12]  # Ensure max 12
 
             return Response({
-                'weekly': weekly_result,
-                'monthly': monthly_result,
-                'three_months': three_months_result
+                'daily_7': daily_7_result,
+                'weekly_8': weekly_8_result,
+                'monthly_12': monthly_12_result
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
+            logger.error(f"Error in AnalyticsTransactionsView: {str(e)}")
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            from rest_framework.views import APIView
             
+# serializers.py (Revised DamagedOverdueReportSerializer)
+# serializers.py (Fixed: Proper ModelSerializer)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.utils import timezone
-from datetime import timedelta
-from django.db.models import Q  # Import Q from django.db.models
-from .models import Transaction
-from .serializers import DamagedOverdueReportSerializer
 
-class DamagedOverdueReportView(APIView):
+from datetime import timedelta
+from django.db.models import Q, Prefetch
+from .models import Transaction, Item
+from .serializers import DamagedOverdueReportSerializer  # FIXED: Import the serializer
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DamagedOverdueReportView(APIView):  # FIXED: Proper APIView
     def post(self, request):
         try:
             # Get filters from request body
             search = request.data.get('search', '')
-            status_filter = request.data.get('status', '').lower()  # Renamed to avoid shadowing
+            status_filter = request.data.get('status', '').lower()
             date_from = request.data.get('dateFrom')
             date_to = request.data.get('dateTo')
 
-            # Base queryset: transactions with damaged items or overdue items
+            today = dj_timezone.now().date()
+
+            # Base queryset
             queryset = Transaction.objects.filter(
                 Q(status='returned', items__condition__iexact='damaged') |
-                Q(status='borrowed', borrow_date__lt=timezone.now().date() - timedelta(days=7))
-            ).distinct()
+                Q(status='borrowed', return_date__lt=today)
+            ).distinct().prefetch_related(
+                Prefetch('items', queryset=Item.objects.only('item_name', 'condition')),
+                'borrower'
+            )
 
-            # Apply search filter (borrower name, school ID, or item name)
+            # Apply search
             if search:
                 queryset = queryset.filter(
                     Q(borrower__name__icontains=search) |
@@ -1449,28 +1491,42 @@ class DamagedOverdueReportView(APIView):
                     Q(items__item_name__icontains=search)
                 )
 
-            # Apply status filter (Damaged or Overdue)
+            # Apply status filter
             if status_filter and status_filter != 'all':
                 if status_filter == 'damaged':
                     queryset = queryset.filter(status='returned', items__condition__iexact='damaged')
                 elif status_filter == 'overdue':
-                    queryset = queryset.filter(status='borrowed', borrow_date__lt=timezone.now().date() - timedelta(days=7))
+                    queryset = queryset.filter(status='borrowed', return_date__lt=today)
 
-            # Apply date range filter
+            # Apply date range
+            from datetime import datetime, timedelta
+
+# ...
             if date_from:
-                queryset = queryset.filter(borrow_date__gte=date_from)
-            if date_to:
-                queryset = queryset.filter(borrow_date__lte=date_to)
+                try:
+                    date_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+                    queryset = queryset.filter(borrow_date__gte=date_from)
+                except ValueError:
+                    return Response({"error": "Invalid dateFrom format"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Serialize the data
+            if date_to:
+                try:
+                    # include the full end day by adding +1 day and using < instead of <=
+                    date_to = datetime.strptime(date_to, "%Y-%m-%d").date() + timedelta(days=1)
+                    queryset = queryset.filter(borrow_date__lt=date_to)
+                except ValueError:
+                    return Response({"error": "Invalid dateTo format"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+            logger.info(f"Queried {queryset.count()} transactions")
+
+            # FIXED: Use the serializer
             serializer = DamagedOverdueReportSerializer(queryset, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            logger.error(f"Error in DamagedOverdueReportView: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
 class CurrentUserView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -1484,3 +1540,264 @@ class CurrentUserView(APIView):
             # 'avatar': '/avatars/shadcn.jpg'  # Default avatar, adjust as needed
         }
         return Response(data)
+    
+    
+from rest_framework import generics
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
+from django.contrib.auth.hashers import make_password
+from .models import CustomUser, RegistrationRequest
+from .serializers import RegistrationRequestSerializer  # Assume you have one for users too
+
+# New ViewSet for listing mobile users under manager
+# views.py (Fixed MobileUsersList)
+from rest_framework import generics
+from rest_framework.response import Response
+from rest_framework import status
+from .models import CustomUser
+
+class MobileUsersList(generics.ListAPIView):
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        # FIXED: Return None to skip serialization (use manual response in list())
+        return None
+
+    def get_queryset(self):
+        if self.request.user.role != 'user_web':
+            return CustomUser.objects.none()
+        return CustomUser.objects.filter(role='user_mobile', manager=self.request.user)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        # FIXED: Manual response (no serializer needed)
+        users_data = [
+            {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'date_joined': user.date_joined.isoformat() if user.date_joined else None,
+            }
+            for user in queryset
+        ]
+        return Response({'users': users_data}, status=status.HTTP_200_OK)
+
+# New endpoint for changing password (manager only)
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def change_mobile_password(request, user_id):
+    if request.user.role != 'user_web':
+        return Response({"error": "Only managers can change passwords"}, status=status.HTTP_403_FORBIDDEN)
+    
+    try:
+        target_user = CustomUser.objects.filter(id=user_id, role='user_mobile', manager=request.user).first()
+        if not target_user:
+            return Response({"error": "User not found or unauthorized"}, status=404)
+        
+        new_password = request.data.get('password')
+        if not new_password:
+            return Response({"error": "Password is required"}, status=400)
+        
+        target_user.set_password(new_password)
+        target_user.save()
+        
+        return Response({"status": "success", "message": "Password updated successfully"}, status=200)
+    
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+    
+    
+
+
+# --- add/ensure imports ---
+from datetime import timedelta
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
+from .models import Item, Transaction
+
+# If you see this anywhere in views.py, fix it:
+# from sympy import Q   <-- WRONG
+# use:
+# from django.db.models import Q  # <-- RIGHT (only if you actually use Q)
+
+class PredictiveDamageInsightView(APIView):
+    """
+    Rule-based prediction: estimates which items are at risk of damage soon.
+    Computes per-item risk using recent borrows, overdue history, and current condition.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Scope items by role
+            if getattr(request.user, "role", None) == "user_web":
+                items_qs = Item.objects.filter(manager=request.user)
+            elif getattr(request.user, "role", None) == "user_mobile" and request.user.manager:
+                items_qs = Item.objects.filter(manager=request.user.manager)
+            else:
+                return Response({"error": "Unauthorized role or missing manager."},
+                                status=status.HTTP_403_FORBIDDEN)
+
+            today = dj_timezone.now().date()
+            ninety_days_ago = today - timedelta(days=90)
+            now_iso = dj_timezone.now().isoformat()
+
+            results = []
+            for item in items_qs:
+                tx_qs = Transaction.objects.filter(items=item)
+
+                total_borrows = tx_qs.count()
+                recent_borrows = tx_qs.filter(borrow_date__gte=ninety_days_ago).count()
+                overdue_count  = tx_qs.filter(status="overdue").count()
+
+                # Use current item condition as a damage signal
+                cond_text = (item.condition or "").lower()
+                damage_flag = any(k in cond_text for k in ["damaged", "damage", "broken", "crack", "dent", "loose"])
+
+                # Heuristic scoring
+                risk = 0.0
+                if recent_borrows > 3:  # heavy recent usage
+                    risk += 0.30
+                if overdue_count > 1:   # mishandling risk
+                    risk += 0.20
+                if damage_flag:         # already showing issues
+                    risk += 0.40
+                if total_borrows > 10:  # wear/tear
+                    risk += 0.10
+                risk = min(1.0, risk)
+
+                reason = (
+                    f"Total borrows: {total_borrows}, "
+                    f"Recent(90d): {recent_borrows}, "
+                    f"Overdue: {overdue_count}, "
+                    f"Current condition: {item.condition or 'N/A'}"
+                )
+
+                results.append({
+                    "item_name": item.item_name,
+                    "condition": item.condition,
+                    "predicted_risk": risk,
+                    "reason": reason,
+                    "last_checked": now_iso,
+                })
+
+            results.sort(key=lambda x: x["predicted_risk"], reverse=True)
+            return Response(results, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            # Print full traceback to your Django console for quick diagnosis
+            import traceback
+            traceback.print_exc()
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+from datetime import datetime, timedelta
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone as dj_timezone
+from django.db.models import Q, Prefetch
+from .models import Transaction, Item, Borrower
+from .serializers import TransactionReportSerializer
+import logging
+
+logger = logging.getLogger(__name__)
+
+class TransactionReportView(APIView):
+    def post(self, request):
+        try:
+            # --- Get filters from request body ---
+            search = request.data.get('search', '')
+            condition_filter = request.data.get('condition', '').lower()
+            date_from = request.data.get('dateFrom')
+            date_to = request.data.get('dateTo')
+            date_type = request.data.get('dateType', 'borrow').lower()  
+            # 👆 new field: 'borrow' | 'return' | 'both'
+
+            today = dj_timezone.now().date()
+
+            queryset = Transaction.objects.select_related('borrower').prefetch_related(
+                Prefetch('items', queryset=Item.objects.only('item_name', 'condition')),
+            ).distinct()
+
+            # --- Condition filter ---
+            if condition_filter and condition_filter != 'all':
+                if condition_filter == 'overdue':
+                    queryset = queryset.filter(status='borrowed', return_date__lt=today)
+                else:
+                    queryset = queryset.filter(
+                        status='returned',
+                        items__condition__iexact=condition_filter
+                    )
+
+            # --- Search filter ---
+            if search:
+                queryset = queryset.filter(
+                    Q(borrower__name__icontains=search) |
+                    Q(borrower__school_id__icontains=search) |
+                    Q(items__item_name__icontains=search)
+                )
+
+            # --- Date parsing ---
+            parsed_from = None
+            parsed_to = None
+            if date_from:
+                parsed_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+            if date_to:
+                parsed_to = datetime.strptime(date_to, "%Y-%m-%d").date() + timedelta(days=1)
+
+            # --- Date filter logic ---
+            if parsed_from and parsed_to:
+                if date_type == "borrow":
+                    queryset = queryset.filter(borrow_date__gte=parsed_from, borrow_date__lt=parsed_to)
+                elif date_type == "return":
+                    queryset = queryset.filter(return_date__isnull=False,
+                                               return_date__gte=parsed_from,
+                                               return_date__lt=parsed_to)
+                elif date_type == "both":
+                    queryset = queryset.filter(
+                        borrow_date__gte=parsed_from, borrow_date__lt=parsed_to,
+                        return_date__isnull=False,
+                        return_date__gte=parsed_from, return_date__lt=parsed_to
+                    )
+            elif parsed_from:
+                # fallback if only start given
+                if date_type == "borrow":
+                    queryset = queryset.filter(borrow_date__gte=parsed_from)
+                elif date_type == "return":
+                    queryset = queryset.filter(return_date__isnull=False, return_date__gte=parsed_from)
+            elif parsed_to:
+                if date_type == "borrow":
+                    queryset = queryset.filter(borrow_date__lt=parsed_to)
+                elif date_type == "return":
+                    queryset = queryset.filter(return_date__isnull=False, return_date__lt=parsed_to)
+
+            # --- Serialize + extra overdue info ---
+            today = dj_timezone.now().date()
+            processed_data = []
+            for tx in queryset:
+                serializer = TransactionReportSerializer(tx, context={'request': request})
+                data = serializer.data
+                if tx.status == 'borrowed' and tx.return_date and tx.return_date < today:
+                    data['daysPastDue'] = (today - tx.return_date).days
+                processed_data.append(data)
+
+            logger.info(f"Queried {len(processed_data)} transactions (dateType={date_type})")
+
+            return Response(processed_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in TransactionReportView: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
