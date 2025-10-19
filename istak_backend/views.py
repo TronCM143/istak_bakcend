@@ -1807,3 +1807,89 @@ from django.http import JsonResponse
 def healthz(_):
     # simple OK; fast and safe
     return JsonResponse({"status": "ok"}, status=200)
+
+
+
+from .models import Item
+from .serializers import SimpleItemSerializer
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SimpleItemListCreateAPIView(generics.ListCreateAPIView):
+    serializer_class = SimpleItemSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None  # Disable pagination for simplicity
+
+    def get_queryset(self):
+        user = self.request.user
+        cache_key = f"simple_items_{user.id}_{user.role}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            logger.info(f"Cache hit for simple items: user={user.username}")
+            return Item.objects.filter(id__in=[item['id'] for item in cached_data])
+
+        if user.role == 'user_web':
+            queryset = Item.objects.filter(manager=user).only('id', 'item_name')
+        elif user.manager:
+            queryset = Item.objects.filter(manager=user.manager).only('id', 'item_name')
+        else:
+            queryset = Item.objects.none()
+
+        serializer = SimpleItemSerializer(queryset, many=True)
+        cache.set(cache_key, serializer.data, 60 * 60)  # Cache for 1 hour
+        logger.info(f"Cached simple items for user={user.username}, count={len(serializer.data)}")
+
+        return queryset
+
+    def perform_create(self, serializer):
+        from PIL import Image
+        from rembg import remove
+        from io import BytesIO
+
+        image_file = self.request.FILES.get('image')
+        new_image = None
+        if image_file:
+            try:
+                if image_file.size > 5 * 1024 * 1024:
+                    logger.error("Image size exceeds 5MB")
+                    return Response(
+                        {"error": "Image size exceeds 5MB"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                input_img = Image.open(image_file).convert("RGBA")
+                input_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+                output_img = remove(input_img)
+                temp_buffer = BytesIO()
+                output_img.save(temp_buffer, format="PNG")
+                temp_buffer.seek(0)
+                new_image = ContentFile(
+                    temp_buffer.read(),
+                    name=f"{image_file.name.rsplit('.', 1)[0]}.png"
+                )
+            except Exception as e:
+                logger.error(f"Error removing background for new item: {str(e)}")
+                return Response(
+                    {"error": f"Failed to process image: {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        manager = self.request.user if self.request.user.role == 'user_web' else self.request.user.manager
+        if not manager:
+            logger.error(f"No manager assigned for user {self.request.user.username}")
+            return Response(
+                {"error": "No manager assigned for mobile user"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        instance = serializer.save(manager=manager, image=new_image if new_image else None)
+
+        cache_key = f"simple_items_{self.request.user.id}_{self.request.user.role}"
+        cache.delete(cache_key)
+        logger.info(f"Invalidated cache for user={self.request.user.username}")
+
+        if new_image:
+            logger.info(f"Background removed for item {instance.id}")
+
+        return Response(serializer.data, status=status.HTTP_201_CREATED)

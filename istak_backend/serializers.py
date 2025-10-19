@@ -370,3 +370,11 @@ class TransactionReportSerializer(serializers.ModelSerializer):
             if obj.return_date < today:
                 return (today - obj.return_date).days
         return None
+
+
+from .models import Item
+
+class SimpleItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Item
+        fields = ['id', 'item_name', 'image']

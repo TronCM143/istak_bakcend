@@ -49,5 +49,5 @@ urlpatterns = [
     path('api/change-password/<int:user_id>/', views.change_mobile_password, name='change-mobile-password'),
    path('api/predictive/insights/', views.PredictiveDamageInsightView.as_view(), name='predictive-insights'),
   path('api/reports/transactions/', views.TransactionReportView.as_view(), name='transaction-report'),
-  
+   path('api/items/simple/', views.SimpleItemListCreateAPIView.as_view(), name='simple_item_list_create'),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
