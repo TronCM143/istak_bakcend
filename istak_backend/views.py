@@ -23,7 +23,6 @@ from datetime import date
 from django.db.models import Count
 from sympy import Q
 
-from .firebase import send_push_notification
 from .models import Transaction, Item, CustomUser, RegistrationRequest, Borrower
 from .serializers import CreateBorrowingSerializer, TransactionSerializer, ItemSerializer, RegistrationRequestSerializer, TopBorrowedItemsSerializer
 from istak_backend import models
