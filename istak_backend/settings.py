@@ -146,7 +146,15 @@ if extra_static.exists():
 
 # Django 4.2+/5: STORAGES; if you're on 3.2 use STATICFILES_STORAGE instead
 STORAGES = {
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {
+            "location": str(BASE_DIR / "media"),
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
 }
 
 MEDIA_URL = "/media/"
