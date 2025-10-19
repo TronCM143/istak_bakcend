@@ -1801,3 +1801,10 @@ class TransactionReportView(APIView):
         except Exception as e:
             logger.error(f"Error in TransactionReportView: {str(e)}")
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+from django.http import JsonResponse
+
+
+def healthz(_):
+    # simple OK; fast and safe
+    return JsonResponse({"status": "ok"}, status=200)
