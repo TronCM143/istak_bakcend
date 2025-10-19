@@ -9,6 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # --- Core envs ---
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-insecure-key")
 DEBUG = os.getenv("DEBUG", "True").lower() in ("1", "true", "yes")
+
+
 ALLOWED_HOSTS = [h.strip() for h in os.getenv(
     "ALLOWED_HOSTS", "*.railway.app,localhost,127.0.0.1,*"
 ).split(",")]
@@ -31,6 +33,20 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
 ]
+
+# CORS
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+CORS_ALLOW_CREDENTIALS = True
+# optional but handy:
+CORS_ALLOW_HEADERS = [
+    "accept", "accept-encoding", "authorization", "content-type",
+    "dnt", "origin", "user-agent", "x-csrftoken", "x-requested-with",
+]
+
+
 
 # --- Middleware (order matters) ---
 MIDDLEWARE = [
@@ -147,18 +163,18 @@ CACHES = {
     }
 }
 
-# --- Celery / Redis ---
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_URL
-CELERY_ACCEPT_CONTENT = ["json"]
-CELERY_TASK_SERIALIZER = "json"
-CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = "Asia/Manila"
+# # --- Celery / Redis ---
+# REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+# CELERY_BROKER_URL = REDIS_URL
+# CELERY_RESULT_BACKEND = REDIS_URL
+# CELERY_ACCEPT_CONTENT = ["json"]
+# CELERY_TASK_SERIALIZER = "json"
+# CELERY_RESULT_SERIALIZER = "json"
+# CELERY_TIMEZONE = "Asia/Manila"
 
-CELERY_BEAT_SCHEDULE = {
-    "notify-due-overdue-every-2min": {
-        "task": "istak_backend.tasks.notify_due_items",
-        "schedule": 60,  # seconds
-    },
-}
+# CELERY_BEAT_SCHEDULE = {
+#     "notify-due-overdue-every-2min": {
+#         "task": "istak_backend.tasks.notify_due_items",
+#         "schedule": 60,  # seconds
+#     },
+# }
