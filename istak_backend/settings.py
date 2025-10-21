@@ -172,17 +172,17 @@ CACHES = {
 }
 
 # # --- Celery / Redis ---
-# REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-# CELERY_BROKER_URL = REDIS_URL
-# CELERY_RESULT_BACKEND = REDIS_URL
-# CELERY_ACCEPT_CONTENT = ["json"]
-# CELERY_TASK_SERIALIZER = "json"
-# CELERY_RESULT_SERIALIZER = "json"
-# CELERY_TIMEZONE = "Asia/Manila"
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "Asia/Manila"
 
-# CELERY_BEAT_SCHEDULE = {
-#     "notify-due-overdue-every-2min": {
-#         "task": "istak_backend.tasks.notify_due_items",
-#         "schedule": 60,  # seconds
-#     },
-# }
+CELERY_BEAT_SCHEDULE = {
+    "notify-due-overdue-every-2min": {
+        "task": "istak_backend.tasks.notify_due_items",
+        "schedule": 60,  # seconds
+    },
+}
