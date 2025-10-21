@@ -6,10 +6,10 @@ from firebase_admin import credentials, messaging
 # Get the current directory of this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-cred_path = os.getenv("FIREBASE_CREDENTIALS")
+x = os.getenv("FIREBASE_CREDENTIALS")
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate(cred_path)
+    cred = credentials.Certificate(x)
     firebase_admin.initialize_app(cred)
 
 def send_push_notification(fcm_token, title, body):
